@@ -1,3 +1,4 @@
+import os
 import socket
 import asyncio
 import csv
@@ -6,7 +7,6 @@ import yaml
 import logging
 from tqdm import tqdm
 from colorama import Fore, Style, init
-from concurrent.futures import ThreadPoolExecutor
 from jinja2 import Template
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -16,9 +16,31 @@ import requests
 # Initialize colorama for colored output
 init()
 
-# Load configuration from YAML
-with open("config.yaml", "r") as file:
-    config = yaml.safe_load(file)
+# Default configuration if 'config.yaml' is missing
+default_config = {
+    'hosts': ['127.0.0.1'],
+    'start_port': 20,
+    'end_port': 8080,
+    'timeout': 2,
+    'email': {
+        'sender': 'your_email@example.com',
+        'recipient': 'recipient@example.com',
+        'smtp_server': 'smtp.example.com',
+        'smtp_port': 587,
+        'password': 'your_email_password'
+    }
+}
+
+# Function to load the configuration from a YAML file
+def load_config(file_path="config.yaml"):
+    if not os.path.exists(file_path):
+        print(f"Warning: {file_path} not found. Using default configuration.")
+        return default_config
+    with open(file_path, "r") as file:
+        return yaml.safe_load(file)
+
+# Load the configuration
+config = load_config()
 
 # Common ports and services for faster service detection
 COMMON_PORTS = {
@@ -145,4 +167,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
