@@ -1,0 +1,148 @@
+import socket
+import asyncio
+import csv
+import smtplib
+import yaml
+import logging
+from tqdm import tqdm
+from colorama import Fore, Style, init
+from concurrent.futures import ThreadPoolExecutor
+from jinja2 import Template
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import matplotlib.pyplot as plt
+import requests
+
+# Initialize colorama for colored output
+init()
+
+# Load configuration from YAML
+with open("config.yaml", "r") as file:
+    config = yaml.safe_load(file)
+
+# Common ports and services for faster service detection
+COMMON_PORTS = {
+    20: "FTP", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+    80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS", 3306: "MySQL",
+    5432: "PostgreSQL", 6379: "Redis", 8080: "HTTP-ALT"
+}
+
+async def check_port(host, port, timeout):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            result = s.connect_ex((host, port))
+            if result == 0:
+                s.send(b'HEAD / HTTP/1.0\r\n\r\n') if port == 80 else None
+                banner = s.recv(100).decode().strip()
+                service = COMMON_PORTS.get(port, "Unknown")
+                return {"port": port, "status": "open", "service": service, "banner": banner}
+            else:
+                return {"port": port, "status": "closed"}
+    except Exception as e:
+        logging.error(f"Error scanning port {port} on {host}: {e}")
+        return {"port": port, "status": "error", "error": str(e)}
+
+async def scan_host_ports(host, start_port, end_port, timeout):
+    tasks = [check_port(host, port, timeout) for port in range(start_port, end_port + 1)]
+    open_ports = []
+    
+    for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Scanning {host}"):
+        port_info = await task
+        if port_info["status"] == "open":
+            open_ports.append(port_info)
+            print(Fore.GREEN + f"Port {port_info['port']} is open ({port_info['service']}) - Banner: {port_info['banner']}" + Style.RESET_ALL)
+        elif port_info["status"] == "closed":
+            print(Fore.RED + f"Port {port_info['port']} is closed" + Style.RESET_ALL)
+        elif port_info["status"] == "error":
+            print(Fore.YELLOW + f"Error on port {port_info['port']}: {port_info['error']}" + Style.RESET_ALL)
+
+    return open_ports
+
+def generate_csv_report(results, filename):
+    with open(filename, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=["Port", "Status", "Service", "Banner"])
+        writer.writeheader()
+        for result in results:
+            writer.writerow(result)
+
+def generate_html_report(results, filename, host):
+    html_template = """
+    <html>
+    <head><title>Port Scan Report for {{ host }}</title></head>
+    <body>
+    <h1>Port Scan Report for {{ host }}</h1>
+    <table border="1">
+        <tr><th>Port</th><th>Status</th><th>Service</th><th>Banner</th></tr>
+        {% for result in results %}
+        <tr>
+            <td>{{ result.port }}</td>
+            <td>{{ result.status }}</td>
+            <td>{{ result.service }}</td>
+            <td>{{ result.banner }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    </body>
+    </html>
+    """
+    template = Template(html_template)
+    with open(filename, "w") as f:
+        f.write(template.render(host=host, results=results))
+
+def generate_chart(results, filename):
+    open_ports = [result["port"] for result in results if result["status"] == "open"]
+    closed_ports = [result["port"] for result in results if result["status"] == "closed"]
+    
+    plt.figure(figsize=(10, 6))
+    plt.hist([open_ports, closed_ports], color=['green', 'red'], label=['Open', 'Closed'], bins=20)
+    plt.title("Port Scan Result Distribution")
+    plt.xlabel("Port Numbers")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.savefig(filename)
+
+def send_email_report(subject, body, attachments=[]):
+    msg = MIMEMultipart()
+    msg['From'] = config['email']['sender']
+    msg['To'] = config['email']['recipient']
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'html'))
+    
+    for attachment in attachments:
+        with open(attachment, "rb") as f:
+            part = MIMEText(f.read(), "base64")
+            part['Content-Disposition'] = f'attachment; filename="{attachment}"'
+            msg.attach(part)
+    
+    with smtplib.SMTP(config['email']['smtp_server'], config['email']['smtp_port']) as server:
+        server.starttls()
+        server.login(config['email']['sender'], config['email']['password'])
+        server.sendmail(config['email']['sender'], config['email']['recipient'], msg.as_string())
+
+async def main():
+    hosts = config['hosts']
+    start_port = config['start_port']
+    end_port = config['end_port']
+    timeout = config['timeout']
+
+    for host in hosts:
+        results = await scan_host_ports(host, start_port, end_port, timeout)
+        
+        csv_report = f"{host}_report.csv"
+        html_report = f"{host}_report.html"
+        chart = f"{host}_chart.png"
+        
+        generate_csv_report(results, csv_report)
+        generate_html_report(results, html_report, host)
+        generate_chart(results, chart)
+        
+        send_email_report(
+            subject=f"Port Scan Report for {host}",
+            body="Please find attached the CSV, HTML report, and chart of the scan.",
+            attachments=[csv_report, html_report, chart]
+        )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
